@@ -50,7 +50,7 @@ class TestPredictionEndpoints:
             json={
                 "latitude": 41.88,
                 "longitude": -87.63,
-                "date": "2024-12-15",
+                "prediction_date": "2024-12-15",
                 "horizon_days": 7,
             },
         )
@@ -74,7 +74,7 @@ class TestPredictionEndpoints:
             json={
                 "latitude": 50.0,  # Outside Chicago
                 "longitude": -87.63,
-                "date": "2024-12-15",
+                "prediction_date": "2024-12-15",
             },
         )
         assert response.status_code == 422  # Validation error
@@ -86,7 +86,7 @@ class TestPredictionEndpoints:
             json={
                 "latitude": 41.88,
                 "longitude": -80.0,  # Outside Chicago
-                "date": "2024-12-15",
+                "prediction_date": "2024-12-15",
             },
         )
         assert response.status_code == 422
@@ -97,9 +97,9 @@ class TestPredictionEndpoints:
             "/api/v1/predictions/batch",
             json={
                 "requests": [
-                    {"latitude": 41.88, "longitude": -87.63, "date": "2024-12-15"},
-                    {"latitude": 41.79, "longitude": -87.68, "date": "2024-12-15"},
-                    {"latitude": 41.95, "longitude": -87.65, "date": "2024-12-15"},
+                    {"latitude": 41.88, "longitude": -87.63, "prediction_date": "2024-12-15"},
+                    {"latitude": 41.79, "longitude": -87.68, "prediction_date": "2024-12-15"},
+                    {"latitude": 41.95, "longitude": -87.65, "prediction_date": "2024-12-15"},
                 ]
             },
         )
@@ -112,7 +112,7 @@ class TestPredictionEndpoints:
         response = client.post(
             "/api/v1/predictions/grid",
             json={
-                "date": "2024-12-15",
+                "prediction_date": "2024-12-15",
                 "horizon_days": 7,
                 "grid_resolution": 10,
             },

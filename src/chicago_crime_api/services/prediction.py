@@ -140,7 +140,7 @@ class PredictionService:
             latitude=lat,
             longitude=lon,
             cell_id=cell_id,
-            date=prediction_date,
+            prediction_date=prediction_date,
             predicted_count=round(predicted_count, 2),
             confidence_lower=round(ci_lower, 2),
             confidence_upper=round(ci_upper, 2),
@@ -168,7 +168,7 @@ class PredictionService:
         return GridPredictionResponse(
             grid=grid.tolist(),
             risk_grid=risk_grid,
-            date=prediction_date,
+            prediction_date=prediction_date,
             horizon_days=horizon_days,
             grid_resolution=resolution,
             bounds={

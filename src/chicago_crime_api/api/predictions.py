@@ -38,7 +38,7 @@ async def predict_crime(
         prediction = service.predict(
             lat=request.latitude,
             lon=request.longitude,
-            prediction_date=request.date,
+            prediction_date=request.prediction_date,
             horizon_days=request.horizon_days,
         )
     except Exception as e:
@@ -72,7 +72,7 @@ async def predict_crime_batch(
             pred = service.predict(
                 lat=req.latitude,
                 lon=req.longitude,
-                prediction_date=req.date,
+                prediction_date=req.prediction_date,
                 horizon_days=req.horizon_days,
             )
             predictions.append(pred)
@@ -104,7 +104,7 @@ async def predict_crime_grid(
     """
     try:
         return service.predict_grid(
-            prediction_date=request.date,
+            prediction_date=request.prediction_date,
             horizon_days=request.horizon_days,
             resolution=request.grid_resolution,
         )
