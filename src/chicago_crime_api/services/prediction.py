@@ -1,4 +1,4 @@
-"""Crime prediction service using trained models."""
+"""Crime prediction service using EventFlow adapters and trained models."""
 
 import time
 from datetime import date, datetime
@@ -12,9 +12,23 @@ import polars as pl
 from chicago_crime_api.config import get_settings
 from chicago_crime_api.schemas import CrimePrediction, GridPredictionResponse
 
+# Import EventFlow adapters
+try:
+    from eventflow.adapters import TableAdapter, RasterAdapter
+    EVENTFLOW_AVAILABLE = True
+except ImportError:
+    EVENTFLOW_AVAILABLE = False
+
+# Import chicago_crime_downloader for data access
+try:
+    from chicago_crime_downloader import catalog
+    DOWNLOADER_AVAILABLE = True
+except ImportError:
+    DOWNLOADER_AVAILABLE = False
+
 
 class PredictionService:
-    """Service for making crime predictions."""
+    """Service for making crime predictions using EventFlow adapters."""
 
     # Chicago geographic bounds
     LAT_MIN, LAT_MAX = 41.64, 42.02
@@ -24,9 +38,38 @@ class PredictionService:
         """Initialize prediction service."""
         self.settings = get_settings()
         self.model: Optional[object] = None
+        self.table_adapter: Optional[object] = None
+        self.raster_adapter: Optional[object] = None
         self.model_version: str = "not_loaded"
         self.model_info: dict = {}
         self._load_model()
+        self._init_eventflow_adapters()
+
+    def _init_eventflow_adapters(self) -> None:
+        """Initialize EventFlow adapters for data transformation."""
+        if not EVENTFLOW_AVAILABLE:
+            return
+        
+        try:
+            # TableAdapter for tabular crime features
+            self.table_adapter = TableAdapter(
+                categorical_columns=["crime_type", "location_type", "day_of_week"],
+                numerical_columns=["latitude", "longitude", "hour", "month"],
+                target_column="crime_count",
+            )
+
+            # RasterAdapter for spatial grid predictions  
+            self.raster_adapter = RasterAdapter(
+                lat_column="latitude",
+                lon_column="longitude",
+                value_column="crime_count",
+                resolution=(50, 50),
+                bounds=(self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX),
+            )
+            
+            self.model_info["eventflow_adapters"] = ["TableAdapter", "RasterAdapter"]
+        except Exception as e:
+            print(f"Warning: Failed to initialize EventFlow adapters: {e}")
 
     def _load_model(self) -> None:
         """Load the trained model from disk."""
@@ -185,6 +228,16 @@ class PredictionService:
     def is_loaded(self) -> bool:
         """Check if model is loaded."""
         return self.model is not None
+
+    @property
+    def has_eventflow(self) -> bool:
+        """Check if EventFlow adapters are available."""
+        return EVENTFLOW_AVAILABLE and self.table_adapter is not None
+
+    @property
+    def has_downloader(self) -> bool:
+        """Check if chicago_crime_downloader is available."""
+        return DOWNLOADER_AVAILABLE
 
 
 # Global service instance
