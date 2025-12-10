@@ -2,6 +2,7 @@
 
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 import joblib
 import numpy as np
@@ -33,11 +34,11 @@ class PredictionService:
     def __init__(self) -> None:
         """Initialize prediction service."""
         self.settings = get_settings()
-        self.model: object | None = None
-        self.table_adapter: object | None = None
-        self.raster_adapter: object | None = None
+        self.model: Any = None
+        self.table_adapter: Any = None
+        self.raster_adapter: Any = None
         self.model_version: str = "not_loaded"
-        self.model_info: dict = {}
+        self.model_info: dict[str, Any] = {}
         self._load_model()
         self._init_eventflow_adapters()
 
@@ -106,17 +107,19 @@ class PredictionService:
 
             with open(meta_file) as f:
                 meta = json.load(f)
-                return meta.get("version", "unknown")
+                version: str = meta.get("version", "unknown")
+                return version
         return "unknown"
 
-    def _load_model_info(self, model_path: Path) -> dict:
+    def _load_model_info(self, model_path: Path) -> dict[str, Any]:
         """Load model information from metadata."""
         meta_file = model_path / "model_metadata.json"
         if meta_file.exists():
             import json
 
             with open(meta_file) as f:
-                return json.load(f)
+                result: dict[str, Any] = json.load(f)
+                return result
         return {}
 
     def _location_to_cell(self, lat: float, lon: float) -> tuple[int, int, int]:
@@ -163,6 +166,8 @@ class PredictionService:
         features = self._extract_features(lat_bin, lon_bin, prediction_date)
 
         # Predict
+        if self.model is None:
+            raise RuntimeError("Model not loaded")
         predicted_count = float(self.model.predict(features)[0])
 
         # Scale by horizon
@@ -191,6 +196,8 @@ class PredictionService:
         grid = np.zeros((resolution, resolution))
         risk_grid = [["low"] * resolution for _ in range(resolution)]
 
+        if self.model is None:
+            raise RuntimeError("Model not loaded")
         for lat_bin in range(resolution):
             for lon_bin in range(resolution):
                 features = self._extract_features(lat_bin, lon_bin, prediction_date)
