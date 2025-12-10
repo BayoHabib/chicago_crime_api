@@ -1,10 +1,8 @@
 """Pydantic schemas for API request/response models."""
 
 import datetime as dt
-from typing import Optional
 
 from pydantic import BaseModel, Field
-
 
 # ============================================================================
 # Request Schemas
@@ -21,7 +19,16 @@ class PredictionRequest(BaseModel):
     prediction_date: dt.date = Field(..., description="Date for prediction")
     horizon_days: int = Field(default=7, ge=1, le=30, description="Prediction horizon in days")
 
-    model_config = {"json_schema_extra": {"example": {"latitude": 41.88, "longitude": -87.63, "prediction_date": "2024-12-15", "horizon_days": 7}}}
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "latitude": 41.88,
+                "longitude": -87.63,
+                "prediction_date": "2024-12-15",
+                "horizon_days": 7,
+            }
+        }
+    }
 
 
 class BatchPredictionRequest(BaseModel):
@@ -85,7 +92,9 @@ class GridPredictionResponse(BaseModel):
     bounds: dict = Field(
         ...,
         description="Geographic bounds",
-        json_schema_extra={"example": {"lat_min": 41.64, "lat_max": 42.02, "lon_min": -87.94, "lon_max": -87.52}},
+        json_schema_extra={
+            "example": {"lat_min": 41.64, "lat_max": 42.02, "lon_min": -87.94, "lon_max": -87.52}
+        },
     )
     model_version: str
     prediction_timestamp: dt.datetime
@@ -103,7 +112,7 @@ class HealthResponse(BaseModel):
     version: str
     environment: str
     model_loaded: bool
-    model_version: Optional[str] = None
+    model_version: str | None = None
 
 
 class ModelInfoResponse(BaseModel):
@@ -126,5 +135,5 @@ class ErrorResponse(BaseModel):
     """Error response schema."""
 
     error: str
-    detail: Optional[str] = None
+    detail: str | None = None
     status_code: int

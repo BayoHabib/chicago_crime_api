@@ -42,7 +42,7 @@ async def predict_crime(
             horizon_days=request.horizon_days,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}") from None
 
     inference_time = (time.time() - start_time) * 1000
 
@@ -80,7 +80,7 @@ async def predict_crime_batch(
             raise HTTPException(
                 status_code=500,
                 detail=f"Prediction failed for ({req.latitude}, {req.longitude}): {str(e)}",
-            )
+            ) from None
 
     total_time = (time.time() - start_time) * 1000
 
@@ -109,4 +109,4 @@ async def predict_crime_grid(
             resolution=request.grid_resolution,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Grid prediction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Grid prediction failed: {str(e)}") from None

@@ -1,7 +1,5 @@
 """Tests for prediction endpoints."""
 
-from datetime import date
-
 import pytest
 from fastapi.testclient import TestClient
 

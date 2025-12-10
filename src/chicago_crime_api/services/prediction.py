@@ -1,30 +1,26 @@
 """Crime prediction service using EventFlow adapters and trained models."""
 
-import time
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
 
 import joblib
 import numpy as np
-import polars as pl
 
 from chicago_crime_api.config import get_settings
 from chicago_crime_api.schemas import CrimePrediction, GridPredictionResponse
 
 # Import EventFlow adapters
 try:
-    from eventflow.adapters import TableAdapter, RasterAdapter
+    from eventflow.adapters import RasterAdapter, TableAdapter
+
     EVENTFLOW_AVAILABLE = True
 except ImportError:
     EVENTFLOW_AVAILABLE = False
 
-# Import chicago_crime_downloader for data access
-try:
-    from chicago_crime_downloader import catalog
-    DOWNLOADER_AVAILABLE = True
-except ImportError:
-    DOWNLOADER_AVAILABLE = False
+# Check chicago_crime_downloader availability
+import importlib.util
+
+DOWNLOADER_AVAILABLE = importlib.util.find_spec("chicago_crime_downloader") is not None
 
 
 class PredictionService:
@@ -37,9 +33,9 @@ class PredictionService:
     def __init__(self) -> None:
         """Initialize prediction service."""
         self.settings = get_settings()
-        self.model: Optional[object] = None
-        self.table_adapter: Optional[object] = None
-        self.raster_adapter: Optional[object] = None
+        self.model: object | None = None
+        self.table_adapter: object | None = None
+        self.raster_adapter: object | None = None
         self.model_version: str = "not_loaded"
         self.model_info: dict = {}
         self._load_model()
@@ -49,7 +45,7 @@ class PredictionService:
         """Initialize EventFlow adapters for data transformation."""
         if not EVENTFLOW_AVAILABLE:
             return
-        
+
         try:
             # TableAdapter for tabular crime features
             self.table_adapter = TableAdapter(
@@ -58,7 +54,7 @@ class PredictionService:
                 target_column="crime_count",
             )
 
-            # RasterAdapter for spatial grid predictions  
+            # RasterAdapter for spatial grid predictions
             self.raster_adapter = RasterAdapter(
                 lat_column="latitude",
                 lon_column="longitude",
@@ -66,7 +62,7 @@ class PredictionService:
                 resolution=(50, 50),
                 bounds=(self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX),
             )
-            
+
             self.model_info["eventflow_adapters"] = ["TableAdapter", "RasterAdapter"]
         except Exception as e:
             print(f"Warning: Failed to initialize EventFlow adapters: {e}")
@@ -92,9 +88,9 @@ class PredictionService:
         # Simple Poisson baseline
         self.model = PoissonRegressor(alpha=1.0)
         # Fit on dummy data (will be replaced by real training)
-        X_dummy = np.random.rand(100, 5)
+        x_dummy = np.random.rand(100, 5)
         y_dummy = np.random.poisson(5, 100)
-        self.model.fit(X_dummy, y_dummy)
+        self.model.fit(x_dummy, y_dummy)
         self.model_version = "baseline_v1"
         self.model_info = {
             "name": "PoissonRegressor",
@@ -137,9 +133,7 @@ class PredictionService:
         cell_id = lat_bin * grid_w + lon_bin
         return lat_bin, lon_bin, cell_id
 
-    def _extract_features(
-        self, lat_bin: int, lon_bin: int, prediction_date: date
-    ) -> np.ndarray:
+    def _extract_features(self, lat_bin: int, lon_bin: int, prediction_date: date) -> np.ndarray:
         """Extract features for prediction."""
         features = [
             lat_bin,
@@ -194,8 +188,6 @@ class PredictionService:
         self, prediction_date: date, horizon_days: int = 7, resolution: int = 10
     ) -> GridPredictionResponse:
         """Predict crime counts for entire grid."""
-        start_time = time.time()
-
         grid = np.zeros((resolution, resolution))
         risk_grid = [["low"] * resolution for _ in range(resolution)]
 
@@ -205,8 +197,6 @@ class PredictionService:
                 predicted = float(self.model.predict(features)[0]) * horizon_days
                 grid[lat_bin, lon_bin] = round(predicted, 2)
                 risk_grid[lat_bin][lon_bin] = self._get_risk_level(predicted)
-
-        inference_time = (time.time() - start_time) * 1000
 
         return GridPredictionResponse(
             grid=grid.tolist(),
@@ -241,7 +231,7 @@ class PredictionService:
 
 
 # Global service instance
-_prediction_service: Optional[PredictionService] = None
+_prediction_service: PredictionService | None = None
 
 
 def get_prediction_service() -> PredictionService:

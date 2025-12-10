@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 
 from chicago_crime_api.config import Settings, get_settings
-from chicago_crime_api.schemas import HealthResponse, ModelInfoResponse
+from chicago_crime_api.schemas import HealthResponse
 from chicago_crime_api.services.prediction import PredictionService, get_prediction_service
 
 router = APIRouter(tags=["health"])

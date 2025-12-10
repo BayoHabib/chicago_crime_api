@@ -1,7 +1,8 @@
 """Pytest configuration and fixtures."""
 
-import pytest
 from unittest.mock import Mock, patch
+
+import pytest
 from fastapi.testclient import TestClient
 
 from chicago_crime_api.main import create_app
