@@ -1,0 +1,26 @@
+stages:
+  download:
+    cmd: python scripts/download_data.py --database data/crimes.duckdb
+    deps:
+      - scripts/download_data.py
+    outs:
+      - data/crimes.duckdb
+
+  process:
+    cmd: python scripts/process_data.py --database data/crimes.duckdb --output data/processed/features.parquet
+    deps:
+      - scripts/process_data.py
+      - data/crimes.duckdb
+    outs:
+      - data/processed/features.parquet
+
+  train:
+    cmd: python scripts/train_model.py --input data/processed/features.parquet --output models/crime_model.joblib --model-type random_forest
+    deps:
+      - scripts/train_model.py
+      - data/processed/features.parquet
+    outs:
+      - models/crime_model.joblib
+    metrics:
+      - models/model_metadata.json:
+          cache: false

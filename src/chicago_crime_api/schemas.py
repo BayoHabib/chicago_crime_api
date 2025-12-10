@@ -10,39 +10,37 @@ from pydantic import BaseModel, Field
 
 
 class PredictionRequest(BaseModel):
-    """Request schema for crime prediction."""
+    """Request schema for weekly crime prediction."""
 
-    latitude: float = Field(..., ge=41.64, le=42.02, description="Latitude within Chicago bounds")
-    longitude: float = Field(
-        ..., ge=-87.94, le=-87.52, description="Longitude within Chicago bounds"
+    prediction_date: dt.date = Field(..., description="Start date for prediction week")
+    horizon_weeks: int = Field(
+        default=1, ge=1, le=4, description="Number of weeks to predict (1-4)"
     )
-    prediction_date: dt.date = Field(..., description="Date for prediction")
-    horizon_days: int = Field(default=7, ge=1, le=30, description="Prediction horizon in days")
 
     model_config = {
         "json_schema_extra": {
             "example": {
-                "latitude": 41.88,
-                "longitude": -87.63,
                 "prediction_date": "2024-12-15",
-                "horizon_days": 7,
+                "horizon_weeks": 2,
             }
         }
     }
 
 
 class BatchPredictionRequest(BaseModel):
-    """Request schema for batch predictions."""
+    """Request schema for batch predictions (multiple dates)."""
 
-    requests: list[PredictionRequest] = Field(..., min_length=1, max_length=100)
+    dates: list[dt.date] = Field(
+        ..., min_length=1, max_length=52, description="List of dates to predict"
+    )
+    horizon_weeks: int = Field(default=1, ge=1, le=4)
 
 
 class GridPredictionRequest(BaseModel):
-    """Request schema for grid-based prediction."""
+    """Request schema for grid-based prediction (kept for compatibility)."""
 
     prediction_date: dt.date = Field(..., description="Date for prediction")
-    horizon_days: int = Field(default=7, ge=1, le=30)
-    grid_resolution: int = Field(default=10, ge=5, le=50, description="Grid resolution (NxN)")
+    horizon_weeks: int = Field(default=1, ge=1, le=4)
 
 
 # ============================================================================
@@ -50,23 +48,21 @@ class GridPredictionRequest(BaseModel):
 # ============================================================================
 
 
-class CrimePrediction(BaseModel):
-    """Single crime prediction result."""
+class WeeklyPrediction(BaseModel):
+    """Single weekly crime prediction result."""
 
-    latitude: float
-    longitude: float
-    cell_id: int
-    prediction_date: dt.date
-    predicted_count: float = Field(..., description="Predicted crime count")
+    week_start: dt.date
+    week_number: int = Field(..., description="Week number of the year (1-52)")
+    predicted_count: float = Field(..., description="Predicted total crime count for the week")
     confidence_lower: float = Field(..., description="95% CI lower bound")
     confidence_upper: float = Field(..., description="95% CI upper bound")
     risk_level: str = Field(..., description="Risk level: low, medium, high, critical")
 
 
 class PredictionResponse(BaseModel):
-    """Response schema for single prediction."""
+    """Response schema for weekly prediction."""
 
-    prediction: CrimePrediction
+    predictions: list[WeeklyPrediction]
     model_version: str
     prediction_timestamp: dt.datetime
     inference_time_ms: float
@@ -75,19 +71,19 @@ class PredictionResponse(BaseModel):
 class BatchPredictionResponse(BaseModel):
     """Response schema for batch predictions."""
 
-    predictions: list[CrimePrediction]
+    predictions: list[WeeklyPrediction]
     model_version: str
     prediction_timestamp: dt.datetime
     total_inference_time_ms: float
 
 
 class GridPredictionResponse(BaseModel):
-    """Response schema for grid prediction."""
+    """Response schema for grid prediction (legacy compatibility)."""
 
     grid: list[list[float]] = Field(..., description="2D grid of predicted counts")
     risk_grid: list[list[str]] = Field(..., description="2D grid of risk levels")
     prediction_date: dt.date
-    horizon_days: int
+    horizon_weeks: int
     grid_resolution: int
     bounds: dict = Field(
         ...,

@@ -15,8 +15,8 @@ COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
 # Install dependencies
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir .
+RUN pip install --no-cache-dir --root-user-action=ignore --upgrade pip \
+    && pip install --no-cache-dir --root-user-action=ignore .
 
 # Production stage
 FROM python:3.11-slim AS production

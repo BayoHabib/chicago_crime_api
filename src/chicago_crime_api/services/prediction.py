@@ -84,19 +84,42 @@ class PredictionService:
 
     def _create_baseline_model(self) -> None:
         """Create a simple baseline model for initial deployment."""
-        from sklearn.linear_model import PoissonRegressor
+        from sklearn.ensemble import RandomForestRegressor
 
-        # Simple Poisson baseline
-        self.model = PoissonRegressor(alpha=1.0)
+        # Match the trained model's feature set
+        feature_columns = [
+            "crime_count_lag1",
+            "crime_count_lag2",
+            "crime_count_lag3",
+            "crime_count_lag4",
+            "crime_count_rolling_mean_4",
+            "crime_count_rolling_std_4",
+            "crime_count_rolling_mean_8",
+            "crime_trend",
+            "week_sin",
+            "week_cos",
+            "week_sin2",
+            "week_cos2",
+            "month",
+            "is_weekend_ratio",
+        ]
+
+        # Simple RandomForest baseline with 14 features
+        self.model = RandomForestRegressor(n_estimators=10, random_state=42)
         # Fit on dummy data (will be replaced by real training)
-        x_dummy = np.random.rand(100, 5)
-        y_dummy = np.random.poisson(5, 100)
+        import pandas as pd
+
+        n_samples = 100
+        x_dummy = pd.DataFrame(
+            np.random.rand(n_samples, len(feature_columns)), columns=feature_columns
+        )
+        y_dummy = np.random.poisson(1, n_samples).astype(float)
         self.model.fit(x_dummy, y_dummy)
-        self.model_version = "baseline_v1"
+        self.model_version = "baseline_v2"
         self.model_info = {
-            "name": "PoissonRegressor",
+            "name": "RandomForestRegressor",
             "type": "baseline",
-            "features": ["lat_bin", "lon_bin", "day_of_week", "month", "hour"],
+            "features": feature_columns,
         }
 
     def _get_model_version(self, model_path: Path) -> str:
@@ -136,16 +159,74 @@ class PredictionService:
         cell_id = lat_bin * grid_w + lon_bin
         return lat_bin, lon_bin, cell_id
 
-    def _extract_features(self, lat_bin: int, lon_bin: int, prediction_date: date) -> np.ndarray:
-        """Extract features for prediction."""
+    def _extract_features(
+        self, lat_bin: int, lon_bin: int, prediction_date: date
+    ) -> tuple[np.ndarray, list[str]]:
+        """Extract features for prediction.
+
+        Returns features matching the trained model:
+        - crime_count_lag1-4: historical crime counts (use mean baseline)
+        - crime_count_rolling_mean_4/8: rolling averages
+        - crime_count_rolling_std_4: rolling std
+        - crime_trend: trend indicator
+        - week_sin/cos, week_sin2/week_cos2: Fourier time encoding
+        - month: month of year
+        - is_weekend_ratio: weekend indicator
+        """
+        # Get week of year for Fourier encoding
+        week_of_year = prediction_date.isocalendar()[1]
+        month = prediction_date.month
+        day_of_week = prediction_date.weekday()
+
+        # Fourier encoding for weekly seasonality
+        week_sin = np.sin(2 * np.pi * week_of_year / 52)
+        week_cos = np.cos(2 * np.pi * week_of_year / 52)
+        week_sin2 = np.sin(4 * np.pi * week_of_year / 52)
+        week_cos2 = np.cos(4 * np.pi * week_of_year / 52)
+
+        # Weekend indicator (0 for weekday date, 1 for weekend)
+        is_weekend_ratio = 1.0 if day_of_week >= 5 else 0.0
+
+        # For predictions without historical data, use baseline values
+        # These would typically come from recent historical aggregations
+        # Using city-wide average crime counts as placeholders
+        baseline_count = 1.0  # Average weekly crimes per cell
+
         features = [
-            lat_bin,
-            lon_bin,
-            prediction_date.weekday(),
-            prediction_date.month,
-            12,  # Default hour (noon)
+            baseline_count,  # crime_count_lag1
+            baseline_count,  # crime_count_lag2
+            baseline_count,  # crime_count_lag3
+            baseline_count,  # crime_count_lag4
+            baseline_count,  # crime_count_rolling_mean_4
+            0.5,  # crime_count_rolling_std_4
+            baseline_count,  # crime_count_rolling_mean_8
+            0.0,  # crime_trend
+            week_sin,  # week_sin
+            week_cos,  # week_cos
+            week_sin2,  # week_sin2
+            week_cos2,  # week_cos2
+            month,  # month
+            is_weekend_ratio,  # is_weekend_ratio
         ]
-        return np.array(features).reshape(1, -1)
+
+        feature_names = [
+            "crime_count_lag1",
+            "crime_count_lag2",
+            "crime_count_lag3",
+            "crime_count_lag4",
+            "crime_count_rolling_mean_4",
+            "crime_count_rolling_std_4",
+            "crime_count_rolling_mean_8",
+            "crime_trend",
+            "week_sin",
+            "week_cos",
+            "week_sin2",
+            "week_cos2",
+            "month",
+            "is_weekend_ratio",
+        ]
+
+        return np.array(features).reshape(1, -1), feature_names
 
     def _get_risk_level(self, predicted_count: float) -> str:
         """Determine risk level from predicted count."""
@@ -162,13 +243,18 @@ class PredictionService:
         self, lat: float, lon: float, prediction_date: date, horizon_days: int = 7
     ) -> CrimePrediction:
         """Make a single prediction."""
+        import pandas as pd
+
         lat_bin, lon_bin, cell_id = self._location_to_cell(lat, lon)
-        features = self._extract_features(lat_bin, lon_bin, prediction_date)
+        features, feature_names = self._extract_features(lat_bin, lon_bin, prediction_date)
+
+        # Create DataFrame with feature names for sklearn compatibility
+        features_df = pd.DataFrame(features, columns=feature_names)
 
         # Predict
         if self.model is None:
             raise RuntimeError("Model not loaded")
-        predicted_count = float(self.model.predict(features)[0])
+        predicted_count = float(self.model.predict(features_df)[0])
 
         # Scale by horizon
         predicted_count *= horizon_days
@@ -193,6 +279,8 @@ class PredictionService:
         self, prediction_date: date, horizon_days: int = 7, resolution: int = 10
     ) -> GridPredictionResponse:
         """Predict crime counts for entire grid."""
+        import pandas as pd
+
         grid = np.zeros((resolution, resolution))
         risk_grid = [["low"] * resolution for _ in range(resolution)]
 
@@ -200,8 +288,11 @@ class PredictionService:
             raise RuntimeError("Model not loaded")
         for lat_bin in range(resolution):
             for lon_bin in range(resolution):
-                features = self._extract_features(lat_bin, lon_bin, prediction_date)
-                predicted = float(self.model.predict(features)[0]) * horizon_days
+                features, feature_names = self._extract_features(
+                    lat_bin, lon_bin, prediction_date
+                )
+                features_df = pd.DataFrame(features, columns=feature_names)
+                predicted = float(self.model.predict(features_df)[0]) * horizon_days
                 grid[lat_bin, lon_bin] = round(predicted, 2)
                 risk_grid[lat_bin][lon_bin] = self._get_risk_level(predicted)
 

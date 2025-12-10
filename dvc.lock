@@ -1,0 +1,52 @@
+schema: '2.0'
+stages:
+  download:
+    cmd: python scripts/download_data.py --database data/crimes.duckdb
+    deps:
+    - path: scripts/download_data.py
+      hash: md5
+      md5: 0bf019d5bf6204e25b068b514137bade
+      size: 8920
+    outs:
+    - path: data/crimes.duckdb
+      hash: md5
+      md5: b2f00a053eb0971a62cbae57f81b759d
+      size: 798720
+  process:
+    cmd: python scripts/process_data.py --database data/crimes.duckdb --output 
+      data/processed/features.parquet
+    deps:
+    - path: data/crimes.duckdb
+      hash: md5
+      md5: b2f00a053eb0971a62cbae57f81b759d
+      size: 798720
+    - path: scripts/process_data.py
+      hash: md5
+      md5: ce13ec0ddeb2280dd319569c4a88cdfe
+      size: 8692
+    outs:
+    - path: data/processed/features.parquet
+      hash: md5
+      md5: dd7e58503e09e6f1025cacaca6bc1e0d
+      size: 5286
+  train:
+    cmd: python scripts/train_model.py --input data/processed/features.parquet 
+      --output models/crime_model.joblib --model-type random_forest
+    deps:
+    - path: data/processed/features.parquet
+      hash: md5
+      md5: dd7e58503e09e6f1025cacaca6bc1e0d
+      size: 5286
+    - path: scripts/train_model.py
+      hash: md5
+      md5: d88c2ca18472855320e081d7546292fc
+      size: 6622
+    outs:
+    - path: models/crime_model.joblib
+      hash: md5
+      md5: 3fc4b36f904135177057c6fc987d5635
+      size: 187553
+    - path: models/model_metadata.json
+      hash: md5
+      md5: a61bd3822aa8b7e6404e5619ee7bf1c9
+      size: 586
