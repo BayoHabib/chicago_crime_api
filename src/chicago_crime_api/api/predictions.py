@@ -4,7 +4,7 @@ Provides endpoints for location-based predictions, hotspots,
 grid predictions, and multi-week forecasts.
 """
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -294,6 +294,31 @@ async def predict_horizon(
         predictions=predictions,
         model_version=service.model_version,
     )
+
+
+@router.get("/crime-types")
+async def get_crime_type_distribution(
+    prediction_date: date | None = Query(default=None, description="Prediction date (defaults to next week)"),
+    top_n: int = Query(default=20, ge=1, le=50, description="Number of hotspots to aggregate"),
+    service: PredictionService = Depends(get_prediction_service),
+) -> dict:
+    """
+    Get predicted crime type distribution across top hotspots.
+
+    Returns breakdown of predicted crimes by type (THEFT, BATTERY, etc.).
+    """
+    if prediction_date is None:
+        prediction_date = date.today() + timedelta(weeks=1)
+    
+    distribution = service.get_crime_type_distribution(
+        target_date=prediction_date,
+        top_n=top_n,
+    )
+    return {
+        "prediction_date": prediction_date.isoformat(),
+        "crime_types": distribution,
+        "total_predicted": sum(distribution.values()),
+    }
 
 
 @router.get("/model/info")
