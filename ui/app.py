@@ -7,6 +7,7 @@ Run with: streamlit run ui/app.py
 from __future__ import annotations
 
 import importlib
+import os
 from datetime import date, timedelta
 
 import pandas as pd
@@ -24,6 +25,9 @@ from map_utils import (
     add_prediction_marker,
     create_base_map,
 )
+
+# Default API URL - can be overridden by environment variable
+DEFAULT_API_URL = os.environ.get("API_URL", "http://localhost:8000")
 
 # Page configuration
 st.set_page_config(
@@ -67,7 +71,7 @@ st.markdown(
 @st.cache_resource
 def get_api_client() -> CrimeAPIClient:
     """Get cached API client."""
-    api_url = st.session_state.get("api_url", "http://localhost:8000")
+    api_url = st.session_state.get("api_url", DEFAULT_API_URL)
     return CrimeAPIClient(base_url=api_url)
 
 
@@ -79,7 +83,7 @@ def render_sidebar() -> dict:
         # API URL configuration
         api_url = st.text_input(
             "API URL",
-            value="http://localhost:8000",
+            value=DEFAULT_API_URL,
             help="Base URL of the prediction API",
         )
         st.session_state["api_url"] = api_url

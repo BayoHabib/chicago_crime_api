@@ -58,6 +58,24 @@ class CrimeAPIClient:
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
+        self._api_available: bool | None = None
+
+    def is_api_available(self) -> bool:
+        """Check if the API is reachable.
+        
+        Returns:
+            True if API responds, False otherwise
+        """
+        if self._api_available is not None:
+            return self._api_available
+        
+        try:
+            response = self.session.get(f"{self.base_url}/api/v1/health", timeout=3)
+            self._api_available = response.status_code == 200
+        except requests.RequestException:
+            self._api_available = False
+        
+        return self._api_available
 
     def health_check(self) -> dict[str, Any]:
         """Check API health status.
