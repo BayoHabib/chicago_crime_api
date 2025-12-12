@@ -319,12 +319,21 @@ def _print_summary(df: pl.DataFrame) -> None:
     logger.info("\nData Summary:")
     logger.info(f"  - Total records: {len(df)}")
     logger.info(f"  - Unique grid cells: {df['grid_id'].n_unique()}")
+    
+    if len(df) == 0:
+        logger.info("  - No data to summarize (empty dataframe)")
+        return
+        
     stats = df.select(
         pl.col("crime_count").mean().alias("mean"),
         pl.col("crime_count").std().alias("std"),
     ).row(0)
-    logger.info(f"  - Crime count mean: {stats[0]:.2f}")
-    logger.info(f"  - Crime count std: {stats[1]:.2f}")
+    
+    mean_val = stats[0] if stats[0] is not None else 0.0
+    std_val = stats[1] if stats[1] is not None else 0.0
+    
+    logger.info(f"  - Crime count mean: {mean_val:.2f}")
+    logger.info(f"  - Crime count std: {std_val:.2f}")
     logger.info(f"  - Features: {list(df.columns)}")
 
 

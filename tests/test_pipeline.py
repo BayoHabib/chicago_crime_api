@@ -18,7 +18,13 @@ def temp_data_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def sample_duckdb(temp_data_dir: Path) -> Path:
-    """Create a sample DuckDB database with crime data."""
+    """Create a sample DuckDB database with crime data.
+
+    Generates enough data to survive weekly aggregation and lag filtering:
+    - 2 distinct grid cells (nearby coordinates)
+    - 30 weeks of data (need 8+ weeks for rolling_mean_8)
+    - Multiple crimes per grid/week to have meaningful counts
+    """
     import duckdb
 
     db_path = temp_data_dir / "data" / "crimes.duckdb"
@@ -45,30 +51,49 @@ def sample_duckdb(temp_data_dir: Path) -> Path:
     """
     )
 
-    # Generate sample data - 100 records over 10 weeks
-    start_date = date.today() - timedelta(days=70)
+    # Generate sample data - need many weeks across few grid cells
+    # Using 30 weeks of data with multiple crimes per week per cell
+    start_date = date.today() - timedelta(days=210)  # ~30 weeks ago
     records = []
-    for i in range(100):
-        day_offset = i % 70
-        hour = i % 24
-        record_date = start_date + timedelta(days=day_offset, hours=hour)
-        records.append(
-            (
-                f"ID{i:06d}",
-                record_date.isoformat(),
-                "THEFT" if i % 3 == 0 else "BATTERY" if i % 3 == 1 else "ASSAULT",
-                "TEST DESCRIPTION",
-                "STREET" if i % 2 == 0 else "RESIDENCE",
-                41.75 + (i % 10) * 0.01,  # latitude
-                -87.65 - (i % 10) * 0.01,  # longitude
-                i % 5 == 0,  # arrest
-                i % 7 == 0,  # domestic
-                str(i % 25),
-                str(i % 12),
-                str(i % 50),
-                str(i % 77),
-            )
-        )
+
+    # Define 2 fixed locations that will map to distinct grid cells
+    locations = [
+        (41.7500, -87.6500),  # Location A
+        (41.7600, -87.6400),  # Location B (different grid cell)
+    ]
+
+    record_id = 0
+    for week in range(30):  # 30 weeks
+        week_start = start_date + timedelta(weeks=week)
+        for loc_idx, (lat, lon) in enumerate(locations):
+            # Generate 5-10 crimes per grid cell per week
+            crimes_this_week = 5 + (week % 5)
+            for crime_num in range(crimes_this_week):
+                day_offset = crime_num % 7
+                hour = (crime_num * 3) % 24
+                record_date = week_start + timedelta(days=day_offset, hours=hour)
+                records.append(
+                    (
+                        f"ID{record_id:06d}",
+                        record_date.isoformat(),
+                        "THEFT"
+                        if crime_num % 3 == 0
+                        else "BATTERY"
+                        if crime_num % 3 == 1
+                        else "ASSAULT",
+                        "TEST DESCRIPTION",
+                        "STREET" if crime_num % 2 == 0 else "RESIDENCE",
+                        lat + (crime_num % 3) * 0.001,  # Small variation within grid
+                        lon + (crime_num % 3) * 0.001,
+                        crime_num % 5 == 0,  # arrest
+                        crime_num % 7 == 0,  # domestic
+                        str(loc_idx * 10 + 1),
+                        str(loc_idx + 1),
+                        str(loc_idx * 25),
+                        str(loc_idx * 38),
+                    )
+                )
+                record_id += 1
 
     conn.executemany(
         "INSERT INTO crimes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -84,7 +109,10 @@ def sample_features_parquet(temp_data_dir: Path) -> Path:
     """Create a sample features parquet file.
 
     Creates data for 2 grid cells over 30 weeks to support temporal split.
+    Uses the 14-feature schema expected by the training script.
     """
+    import math
+
     features_path = temp_data_dir / "data" / "processed" / "features.parquet"
 
     # Create sample weekly aggregated data for multiple grid cells over 30 weeks
@@ -92,6 +120,13 @@ def sample_features_parquet(temp_data_dir: Path) -> Path:
     for grid_id in [100, 200]:  # 2 grid cells
         for week in range(1, 31):  # 30 weeks
             base_count = 50 + week * 2 + (grid_id // 10)
+            rolling_mean_4 = float(base_count - 5)
+            lag1 = base_count - 2
+
+            # Fourier encoding for week_of_year
+            angle1 = week * 2 * math.pi / 52
+            angle2 = week * 4 * math.pi / 52
+
             records.append(
                 {
                     "year": 2025,
@@ -102,10 +137,20 @@ def sample_features_parquet(temp_data_dir: Path) -> Path:
                     "is_weekend_ratio": 0.3,
                     "lat_bin": grid_id // 100,
                     "lon_bin": grid_id % 100,
-                    "crime_count_lag1": base_count - 2,
+                    # 14 features for training:
+                    "crime_count_lag1": lag1,
                     "crime_count_lag2": base_count - 4,
+                    "crime_count_lag3": base_count - 6,
                     "crime_count_lag4": base_count - 8,
-                    "crime_count_rolling_mean_4": float(base_count - 5),
+                    "crime_count_rolling_mean_4": rolling_mean_4,
+                    "crime_count_rolling_std_4": 2.5,
+                    "crime_count_rolling_mean_8": float(base_count - 10),
+                    "crime_trend": float(lag1 - rolling_mean_4),
+                    "week_sin": math.sin(angle1),
+                    "week_cos": math.cos(angle1),
+                    "week_sin2": math.sin(angle2),
+                    "week_cos2": math.cos(angle2),
+                    "month": (week // 4) + 1,
                 }
             )
 
@@ -344,8 +389,28 @@ class TestTrainModel:
         # Load and use model
         model = joblib.load(model_path)
 
-        # Create test input
-        test_input = [[25, 25, 10, 12.5, 0.3, 50, 48, 44, 47.0]]  # feature values
+        # Create test input with 14 features matching training feature columns:
+        # crime_count_lag1, lag2, lag3, lag4, rolling_mean_4, rolling_std_4,
+        # rolling_mean_8, crime_trend, week_sin, week_cos, week_sin2, week_cos2,
+        # month, is_weekend_ratio
+        test_input = [
+            [
+                50.0,  # crime_count_lag1
+                48.0,  # crime_count_lag2
+                46.0,  # crime_count_lag3
+                44.0,  # crime_count_lag4
+                47.0,  # crime_count_rolling_mean_4
+                2.5,  # crime_count_rolling_std_4
+                45.0,  # crime_count_rolling_mean_8
+                3.0,  # crime_trend
+                0.5,  # week_sin
+                0.87,  # week_cos
+                0.97,  # week_sin2
+                -0.26,  # week_cos2
+                6.0,  # month
+                0.3,  # is_weekend_ratio
+            ]
+        ]
 
         predictions = model.predict(test_input)
 
@@ -382,9 +447,30 @@ class TestPipelineIntegration:
         assert model_path.exists()
         assert (temp_data_dir / "models" / "model_metadata.json").exists()
 
-        # Verify model works
+        # Verify model works with 14-feature input
         model = joblib.load(model_path)
-        test_input = [[25, 25, 10, 12.5, 0.3, 50, 48, 44, 47.0]]
+        # Create test input with 14 features matching training feature columns:
+        # crime_count_lag1, lag2, lag3, lag4, rolling_mean_4, rolling_std_4,
+        # rolling_mean_8, crime_trend, week_sin, week_cos, week_sin2, week_cos2,
+        # month, is_weekend_ratio
+        test_input = [
+            [
+                50.0,  # crime_count_lag1
+                48.0,  # crime_count_lag2
+                46.0,  # crime_count_lag3
+                44.0,  # crime_count_lag4
+                47.0,  # crime_count_rolling_mean_4
+                2.5,  # crime_count_rolling_std_4
+                45.0,  # crime_count_rolling_mean_8
+                3.0,  # crime_trend
+                0.5,  # week_sin
+                0.87,  # week_cos
+                0.97,  # week_sin2
+                -0.26,  # week_cos2
+                6.0,  # month
+                0.3,  # is_weekend_ratio
+            ]
+        ]
         predictions = model.predict(test_input)
 
         assert len(predictions) == 1

@@ -44,31 +44,27 @@ class TestPredictionEndpoints:
     def test_single_prediction(self, client):
         """Test single prediction endpoint."""
         response = client.post(
-            "/api/v1/predictions/",
+            "/api/v1/predictions/location",
             json={
                 "latitude": 41.88,
                 "longitude": -87.63,
                 "prediction_date": "2024-12-15",
-                "horizon_days": 7,
             },
         )
         assert response.status_code == 200
         data = response.json()
-        assert "prediction" in data
+        assert "grid_id" in data
         assert "model_version" in data
-        assert "inference_time_ms" in data
-
-        pred = data["prediction"]
-        assert "predicted_count" in pred
-        assert "confidence_lower" in pred
-        assert "confidence_upper" in pred
-        assert "risk_level" in pred
-        assert pred["risk_level"] in ["low", "medium", "high", "critical"]
+        assert "predicted_count" in data
+        assert "confidence_lower" in data
+        assert "confidence_upper" in data
+        assert "risk_level" in data
+        assert data["risk_level"] in ["low", "medium", "high", "critical"]
 
     def test_prediction_invalid_latitude(self, client):
         """Test prediction with invalid latitude."""
         response = client.post(
-            "/api/v1/predictions/",
+            "/api/v1/predictions/location",
             json={
                 "latitude": 50.0,  # Outside Chicago
                 "longitude": -87.63,
@@ -80,7 +76,7 @@ class TestPredictionEndpoints:
     def test_prediction_invalid_longitude(self, client):
         """Test prediction with invalid longitude."""
         response = client.post(
-            "/api/v1/predictions/",
+            "/api/v1/predictions/location",
             json={
                 "latitude": 41.88,
                 "longitude": -80.0,  # Outside Chicago
@@ -89,21 +85,20 @@ class TestPredictionEndpoints:
         )
         assert response.status_code == 422
 
-    def test_batch_prediction(self, client):
-        """Test batch prediction endpoint."""
+    def test_hotspots_prediction(self, client):
+        """Test hotspots prediction endpoint."""
         response = client.post(
-            "/api/v1/predictions/batch",
+            "/api/v1/predictions/hotspots",
             json={
-                "requests": [
-                    {"latitude": 41.88, "longitude": -87.63, "prediction_date": "2024-12-15"},
-                    {"latitude": 41.79, "longitude": -87.68, "prediction_date": "2024-12-15"},
-                    {"latitude": 41.95, "longitude": -87.65, "prediction_date": "2024-12-15"},
-                ]
+                "prediction_date": "2024-12-15",
+                "top_n": 5,
             },
         )
+        # May return empty results if no historical data available
         assert response.status_code == 200
         data = response.json()
-        assert len(data["predictions"]) == 3
+        assert "hotspots" in data
+        assert "model_version" in data
 
     def test_grid_prediction(self, client):
         """Test grid prediction endpoint."""
@@ -111,16 +106,13 @@ class TestPredictionEndpoints:
             "/api/v1/predictions/grid",
             json={
                 "prediction_date": "2024-12-15",
-                "horizon_days": 7,
-                "grid_resolution": 10,
             },
         )
         assert response.status_code == 200
         data = response.json()
-        assert "grid" in data
-        assert "risk_grid" in data
-        assert len(data["grid"]) == 10
-        assert len(data["grid"][0]) == 10
+        assert "grid_data" in data
+        assert "summary" in data
+        assert "prediction_date" in data
 
 
 class TestRootEndpoint:

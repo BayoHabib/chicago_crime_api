@@ -1,232 +1,534 @@
-"""Crime prediction service using EventFlow adapters and trained models."""
+"""Crime prediction service using the new model architecture.
 
-from datetime import date, datetime
+Provides high-level API for making crime predictions with proper
+historical data integration, caching, and model management.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import date
 from pathlib import Path
 from typing import Any
 
-import joblib
-import numpy as np
-
 from chicago_crime_api.config import get_settings
-from chicago_crime_api.schemas import CrimePrediction, GridPredictionResponse
+from chicago_crime_api.models import (
+    ModelConfig,
+    ModelRegistry,
+    WeeklyCrimeModel,
+    get_registry,
+)
+from chicago_crime_api.services.cache import DataCache
+from chicago_crime_api.services.feature_builder import FeatureBuilder
+from chicago_crime_api.services.grid_mapper import GridMapper
+from chicago_crime_api.services.historical_data import (
+    HistoricalDataService,
+    get_historical_data_service,
+)
 
-# Import EventFlow adapters
-try:
-    from eventflow.adapters import RasterAdapter, TableAdapter
-
-    EVENTFLOW_AVAILABLE = True
-except ImportError:
-    EVENTFLOW_AVAILABLE = False
-
-# Check chicago_crime_downloader availability
-import importlib.util
-
-DOWNLOADER_AVAILABLE = importlib.util.find_spec("chicago_crime_downloader") is not None
+logger = logging.getLogger(__name__)
 
 
 class PredictionService:
-    """Service for making crime predictions using EventFlow adapters."""
+    """Service for making crime predictions.
 
-    # Chicago geographic bounds
-    LAT_MIN, LAT_MAX = 41.64, 42.02
-    LON_MIN, LON_MAX = -87.94, -87.52
+    Integrates:
+    - Model registry for model management
+    - Historical data service for crime history
+    - Grid mapper for location -> grid conversion
+    - Caching for performance
+    """
 
-    def __init__(self) -> None:
-        """Initialize prediction service."""
+    def __init__(
+        self,
+        model_path: str | None = None,
+        data_path: str | None = None,
+    ) -> None:
+        """Initialize prediction service.
+
+        Args:
+            model_path: Override path to model file
+            data_path: Override path to historical data
+        """
         self.settings = get_settings()
-        self.model: Any = None
-        self.table_adapter: Any = None
-        self.raster_adapter: Any = None
-        self.model_version: str = "not_loaded"
-        self.model_info: dict[str, Any] = {}
-        self._load_model()
-        self._init_eventflow_adapters()
+        self._model_path = model_path or str(Path(self.settings.model_path) / "crime_model.joblib")
+        self._data_path = data_path
 
-    def _init_eventflow_adapters(self) -> None:
-        """Initialize EventFlow adapters for data transformation."""
-        if not EVENTFLOW_AVAILABLE:
+        # Services
+        self._registry: ModelRegistry | None = None
+        self._cache: DataCache | None = None
+        self._historical_service: HistoricalDataService | None = None
+        self._grid_mapper: GridMapper | None = None
+        self._feature_builder: FeatureBuilder | None = None
+
+        # State
+        self._initialized = False
+
+    def initialize(self) -> None:
+        """Initialize all services and load model.
+
+        Call this during application startup.
+        """
+        if self._initialized:
             return
 
-        try:
-            # TableAdapter for tabular crime features
-            self.table_adapter = TableAdapter(
-                categorical_columns=["crime_type", "location_type", "day_of_week"],
-                numerical_columns=["latitude", "longitude", "hour", "month"],
-                target_column="crime_count",
-            )
+        logger.info("Initializing PredictionService...")
 
-            # RasterAdapter for spatial grid predictions
-            self.raster_adapter = RasterAdapter(
-                lat_column="latitude",
-                lon_column="longitude",
-                value_column="crime_count",
-                resolution=(50, 50),
-                bounds=(self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX),
-            )
+        # Initialize cache
+        self._cache = DataCache.get_instance()
 
-            self.model_info["eventflow_adapters"] = ["TableAdapter", "RasterAdapter"]
-        except Exception as e:
-            print(f"Warning: Failed to initialize EventFlow adapters: {e}")
+        # Initialize grid mapper
+        self._grid_mapper = GridMapper()
+
+        # Initialize feature builder
+        self._feature_builder = FeatureBuilder()
+
+        # Initialize historical data service
+        self._historical_service = get_historical_data_service(data_path=self._data_path)
+
+        # Initialize model registry and load model
+        self._registry = get_registry()
+        self._registry.register_class(WeeklyCrimeModel, "weekly_crime")
+
+        # Load the weekly crime model
+        self._load_model()
+
+        self._initialized = True
+        logger.info("PredictionService initialized successfully")
 
     def _load_model(self) -> None:
-        """Load the trained model from disk."""
-        model_path = Path(self.settings.model_path)
+        """Load the crime prediction model."""
+        model_path = Path(self._model_path)
 
-        # Try to load the latest model
-        model_file = model_path / "crime_model.joblib"
-        if model_file.exists():
-            self.model = joblib.load(model_file)
-            self.model_version = self._get_model_version(model_path)
-            self.model_info = self._load_model_info(model_path)
+        if model_path.exists():
+            config = ModelConfig(
+                name="Weekly Crime Predictor",
+                model_id="weekly_crime_v1",
+                model_uri=str(model_path),
+                backend="sklearn",
+                version=self._get_model_version(),
+                description="Predicts weekly crime counts per grid cell",
+                required_history_weeks=8,
+            )
         else:
-            # Use baseline model if no trained model exists
+            # Use default/baseline model
+            logger.warning(f"Model not found at {model_path}, using baseline")
+            config = ModelConfig(
+                name="Weekly Crime Predictor (Baseline)",
+                model_id="weekly_crime_baseline",
+                model_uri="",
+                backend="sklearn",
+                version="baseline",
+                description="Baseline model for initial deployment",
+                required_history_weeks=8,
+            )
+
+        try:
+            model = WeeklyCrimeModel(config=config, model_path=self._model_path)
+            model.load()
+            self._registry.register(model, set_default=True)
+        except Exception as e:
+            logger.error(f"Failed to load model: {e}")
+            # Create and register a baseline model
             self._create_baseline_model()
 
     def _create_baseline_model(self) -> None:
-        """Create a simple baseline model for initial deployment."""
+        """Create a baseline model for initial deployment."""
+        import tempfile
+
+        import joblib
+        import numpy as np
+        import pandas as pd
         from sklearn.ensemble import RandomForestRegressor
 
-        # Match the trained model's feature set
-        feature_columns = [
-            "crime_count_lag1",
-            "crime_count_lag2",
-            "crime_count_lag3",
-            "crime_count_lag4",
-            "crime_count_rolling_mean_4",
-            "crime_count_rolling_std_4",
-            "crime_count_rolling_mean_8",
-            "crime_trend",
-            "week_sin",
-            "week_cos",
-            "week_sin2",
-            "week_cos2",
-            "month",
-            "is_weekend_ratio",
-        ]
+        logger.info("Creating baseline model...")
 
-        # Simple RandomForest baseline with 14 features
-        self.model = RandomForestRegressor(n_estimators=10, random_state=42)
-        # Fit on dummy data (will be replaced by real training)
-        import pandas as pd
+        feature_columns = FeatureBuilder.FEATURE_COLUMNS
 
+        # Create a simple trained model
+        model = RandomForestRegressor(n_estimators=10, random_state=42)
         n_samples = 100
-        x_dummy = pd.DataFrame(
-            np.random.rand(n_samples, len(feature_columns)), columns=feature_columns
+        train_x = pd.DataFrame(
+            np.random.rand(n_samples, len(feature_columns)),
+            columns=feature_columns,
         )
-        y_dummy = np.random.poisson(1, n_samples).astype(float)
-        self.model.fit(x_dummy, y_dummy)
-        self.model_version = "baseline_v2"
-        self.model_info = {
-            "name": "RandomForestRegressor",
-            "type": "baseline",
-            "features": feature_columns,
-        }
+        train_y = np.random.poisson(5, n_samples).astype(float)
+        model.fit(train_x, train_y)
 
-    def _get_model_version(self, model_path: Path) -> str:
-        """Get model version from metadata file."""
+        # Save to temp file
+        with tempfile.NamedTemporaryFile(suffix=".joblib", delete=False) as f:
+            joblib.dump(model, f.name)
+            temp_path = f.name
+
+        config = ModelConfig(
+            name="Weekly Crime Predictor (Baseline)",
+            model_id="weekly_crime_baseline",
+            model_uri=temp_path,
+            backend="sklearn",
+            version="baseline",
+            description="Baseline model for testing",
+            required_history_weeks=8,
+        )
+
+        baseline_model = WeeklyCrimeModel(config=config, model_path=temp_path)
+        baseline_model.load()
+        self._registry.register(baseline_model, set_default=True)
+
+    def _get_model_version(self) -> str:
+        """Get model version from metadata."""
+        import json
+
+        model_path = Path(self._model_path).parent
         meta_file = model_path / "model_metadata.json"
-        if meta_file.exists():
-            import json
 
+        if meta_file.exists():
             with open(meta_file) as f:
                 meta = json.load(f)
-                version: str = meta.get("version", "unknown")
-                return version
+                return meta.get("version", "unknown")
         return "unknown"
 
-    def _load_model_info(self, model_path: Path) -> dict[str, Any]:
-        """Load model information from metadata."""
-        meta_file = model_path / "model_metadata.json"
-        if meta_file.exists():
-            import json
+    def _ensure_initialized(self) -> None:
+        """Ensure service is initialized."""
+        if not self._initialized:
+            self.initialize()
 
-            with open(meta_file) as f:
-                result: dict[str, Any] = json.load(f)
-                return result
-        return {}
+    def predict_for_location(
+        self,
+        latitude: float,
+        longitude: float,
+        target_date: date,
+    ) -> dict[str, Any]:
+        """Predict crime count for a specific location.
 
-    def _location_to_cell(self, lat: float, lon: float) -> tuple[int, int, int]:
-        """Convert lat/lon to grid cell."""
-        grid_h, grid_w = self.settings.grid_size
+        Args:
+            latitude: Location latitude
+            longitude: Location longitude
+            target_date: Date to predict for
 
-        lat_bin = int((lat - self.LAT_MIN) / (self.LAT_MAX - self.LAT_MIN) * grid_h)
-        lon_bin = int((lon - self.LON_MIN) / (self.LON_MAX - self.LON_MIN) * grid_w)
-
-        # Clamp to valid range
-        lat_bin = max(0, min(lat_bin, grid_h - 1))
-        lon_bin = max(0, min(lon_bin, grid_w - 1))
-
-        cell_id = lat_bin * grid_w + lon_bin
-        return lat_bin, lon_bin, cell_id
-
-    def _extract_features(
-        self, lat_bin: int, lon_bin: int, prediction_date: date
-    ) -> tuple[np.ndarray, list[str]]:
-        """Extract features for prediction.
-
-        Returns features matching the trained model:
-        - crime_count_lag1-4: historical crime counts (use mean baseline)
-        - crime_count_rolling_mean_4/8: rolling averages
-        - crime_count_rolling_std_4: rolling std
-        - crime_trend: trend indicator
-        - week_sin/cos, week_sin2/week_cos2: Fourier time encoding
-        - month: month of year
-        - is_weekend_ratio: weekend indicator
+        Returns:
+            Prediction result dictionary
         """
-        # Get week of year for Fourier encoding
-        week_of_year = prediction_date.isocalendar()[1]
-        month = prediction_date.month
-        day_of_week = prediction_date.weekday()
+        self._ensure_initialized()
 
-        # Fourier encoding for weekly seasonality
-        week_sin = np.sin(2 * np.pi * week_of_year / 52)
-        week_cos = np.cos(2 * np.pi * week_of_year / 52)
-        week_sin2 = np.sin(4 * np.pi * week_of_year / 52)
-        week_cos2 = np.cos(4 * np.pi * week_of_year / 52)
+        # Convert location to grid cell
+        try:
+            grid_cell = self._grid_mapper.lat_lon_to_grid(latitude, longitude)
+            grid_id = grid_cell.grid_id
+        except ValueError:
+            return {
+                "error": "Location outside Chicago boundaries",
+                "latitude": latitude,
+                "longitude": longitude,
+            }
 
-        # Weekend indicator (0 for weekday date, 1 for weekend)
-        is_weekend_ratio = 1.0 if day_of_week >= 5 else 0.0
+        # Get historical data for the cell
+        history = self._historical_service.get_cell_history(
+            grid_id=grid_id,
+            num_weeks=8,
+        )
 
-        # For predictions without historical data, use baseline values
-        # These would typically come from recent historical aggregations
-        # Using city-wide average crime counts as placeholders
-        baseline_count = 1.0  # Average weekly crimes per cell
+        if not history:
+            # Use baseline prediction if no history
+            return self._baseline_prediction(
+                grid_id=grid_id,
+                latitude=latitude,
+                longitude=longitude,
+                target_date=target_date,
+            )
 
-        features = [
-            baseline_count,  # crime_count_lag1
-            baseline_count,  # crime_count_lag2
-            baseline_count,  # crime_count_lag3
-            baseline_count,  # crime_count_lag4
-            baseline_count,  # crime_count_rolling_mean_4
-            0.5,  # crime_count_rolling_std_4
-            baseline_count,  # crime_count_rolling_mean_8
-            0.0,  # crime_trend
-            week_sin,  # week_sin
-            week_cos,  # week_cos
-            week_sin2,  # week_sin2
-            week_cos2,  # week_cos2
-            month,  # month
-            is_weekend_ratio,  # is_weekend_ratio
+        # Get historical counts (newest first)
+        historical_counts = [r.crime_count for r in history]
+
+        # Get model and predict
+        model = self._registry.get()
+        result = model.predict(
+            grid_id=grid_id,
+            target_date=target_date,
+            historical_counts=historical_counts,
+        )
+
+        # Get grid cell center for response
+        center_lat, center_lon = self._grid_mapper.grid_id_to_center(grid_id)
+
+        return {
+            "grid_id": grid_id,
+            "latitude": latitude,
+            "longitude": longitude,
+            "cell_center": {"latitude": center_lat, "longitude": center_lon},
+            "prediction_date": target_date.isoformat(),
+            "predicted_count": result.predicted_count,
+            "confidence_lower": result.confidence_lower,
+            "confidence_upper": result.confidence_upper,
+            "risk_level": self._get_risk_level(result.predicted_count),
+            "model_id": result.model_id,
+            "model_version": result.model_version,
+        }
+
+    def _baseline_prediction(
+        self,
+        grid_id: int,
+        latitude: float,
+        longitude: float,
+        target_date: date,
+    ) -> dict[str, Any]:
+        """Make baseline prediction when no historical data available."""
+        # Use city-wide average as baseline
+        city_stats = self._historical_service.get_city_wide_stats(weeks=8)
+
+        if city_stats:
+            baseline_count = city_stats.get("mean_weekly_count", 5.0)
+        else:
+            baseline_count = 5.0
+
+        return {
+            "grid_id": grid_id,
+            "latitude": latitude,
+            "longitude": longitude,
+            "prediction_date": target_date.isoformat(),
+            "predicted_count": baseline_count,
+            "confidence_lower": max(0, baseline_count - 2),
+            "confidence_upper": baseline_count + 2,
+            "risk_level": self._get_risk_level(baseline_count),
+            "model_id": "baseline",
+            "model_version": "baseline",
+            "is_baseline": True,
+            "note": "No historical data available for this cell",
+        }
+
+    def predict_hotspots(
+        self,
+        target_date: date,
+        top_n: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Predict top crime hotspots.
+
+        Args:
+            target_date: Date to predict for
+            top_n: Number of hotspots to return
+
+        Returns:
+            List of hotspot predictions
+        """
+        self._ensure_initialized()
+
+        # Get historically active cells
+        top_cells = self._historical_service.get_top_cells_by_crime(
+            num_weeks=8,
+            top_n=top_n * 2,  # Get more to account for filtering
+        )
+
+        if not top_cells:
+            return []
+
+        # Get predictions for each cell
+        model = self._registry.get()
+        results = []
+
+        for grid_id, avg_count in top_cells[:top_n]:
+            # Get historical counts for this cell
+            history = self._historical_service.get_cell_history(
+                grid_id=grid_id,
+                num_weeks=8,
+            )
+
+            if not history:
+                continue
+
+            historical_counts = [r.crime_count for r in history]
+
+            try:
+                result = model.predict(
+                    grid_id=grid_id,
+                    target_date=target_date,
+                    historical_counts=historical_counts,
+                )
+
+                center_lat, center_lon = self._grid_mapper.grid_id_to_center(grid_id)
+
+                results.append(
+                    {
+                        "rank": len(results) + 1,
+                        "grid_id": grid_id,
+                        "cell_center": {"latitude": center_lat, "longitude": center_lon},
+                        "prediction_date": target_date.isoformat(),
+                        "predicted_count": result.predicted_count,
+                        "confidence_lower": result.confidence_lower,
+                        "confidence_upper": result.confidence_upper,
+                        "risk_level": self._get_risk_level(result.predicted_count),
+                        "historical_average": avg_count,
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to predict for grid {grid_id}: {e}")
+                continue
+
+        # Sort by predicted count descending
+        results.sort(key=lambda x: x["predicted_count"], reverse=True)
+
+        # Re-rank
+        for i, r in enumerate(results):
+            r["rank"] = i + 1
+
+        return results[:top_n]
+
+    def predict_grid(
+        self,
+        target_date: date,
+        bounds: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """Predict crime counts for a grid of cells.
+
+        Args:
+            target_date: Date to predict for
+            bounds: Optional geographic bounds
+
+        Returns:
+            Grid prediction result
+        """
+        self._ensure_initialized()
+
+        # Get all active cells
+        active_cells = self._historical_service.get_top_cells_by_crime(
+            num_weeks=8,
+            top_n=1000,  # Limit for performance
+        )
+
+        if not active_cells:
+            return {
+                "prediction_date": target_date.isoformat(),
+                "grid_data": [],
+                "summary": {"total_cells": 0},
+            }
+
+        # Batch predict
+        model = self._registry.get()
+
+        # Build historical counts map
+        historical_counts_map = {}
+        for grid_id, _avg_count in active_cells:
+            history = self._historical_service.get_cell_history(
+                grid_id=grid_id,
+                num_weeks=8,
+            )
+            if history:
+                historical_counts_map[grid_id] = [r.crime_count for r in history]
+
+        # Batch predict
+        results = model.predict_batch(
+            grid_ids=list(historical_counts_map.keys()),
+            target_date=target_date,
+            historical_counts_map=historical_counts_map,
+        )
+
+        # Build response
+        grid_data = []
+        for result in results:
+            try:
+                center_lat, center_lon = self._grid_mapper.grid_id_to_center(result.grid_id)
+                cell_center = {"latitude": center_lat, "longitude": center_lon}
+            except ValueError:
+                # grid_id from historical data may use different encoding
+                cell_center = None
+
+            grid_data.append(
+                {
+                    "grid_id": result.grid_id,
+                    "cell_center": cell_center,
+                    "predicted_count": result.predicted_count,
+                    "confidence_lower": result.confidence_lower,
+                    "confidence_upper": result.confidence_upper,
+                    "risk_level": self._get_risk_level(result.predicted_count),
+                }
+            )
+
+        # Calculate summary statistics
+        predictions = [r.predicted_count for r in results]
+        summary = {
+            "total_cells": len(results),
+            "total_predicted_crimes": sum(predictions),
+            "mean_per_cell": sum(predictions) / len(predictions) if predictions else 0,
+            "max_per_cell": max(predictions) if predictions else 0,
+            "high_risk_cells": sum(
+                1 for p in predictions if self._get_risk_level(p) in ["high", "critical"]
+            ),
+        }
+
+        return {
+            "prediction_date": target_date.isoformat(),
+            "model_id": model.config.model_id,
+            "model_version": model.config.version,
+            "grid_data": grid_data,
+            "summary": summary,
+        }
+
+    def predict_horizon(
+        self,
+        latitude: float,
+        longitude: float,
+        start_date: date,
+        horizon_weeks: int = 4,
+    ) -> list[dict[str, Any]]:
+        """Predict multiple weeks into the future.
+
+        Args:
+            latitude: Location latitude
+            longitude: Location longitude
+            start_date: First prediction date
+            horizon_weeks: Number of weeks to predict
+
+        Returns:
+            List of weekly predictions
+        """
+        self._ensure_initialized()
+
+        try:
+            grid_cell = self._grid_mapper.lat_lon_to_grid(latitude, longitude)
+            grid_id = grid_cell.grid_id
+        except ValueError:
+            return [
+                {
+                    "error": "Location outside Chicago boundaries",
+                    "latitude": latitude,
+                    "longitude": longitude,
+                }
+            ]
+
+        # Get historical data
+        history = self._historical_service.get_cell_history(
+            grid_id=grid_id,
+            num_weeks=8,
+        )
+
+        if not history:
+            return [
+                {
+                    "error": "Insufficient historical data",
+                    "grid_id": grid_id,
+                }
+            ]
+
+        historical_counts = [r.crime_count for r in history]
+
+        # Get horizon predictions
+        model = self._registry.get()
+        results = model.predict_horizon(
+            grid_id=grid_id,
+            start_date=start_date,
+            historical_counts=historical_counts,
+            horizon_weeks=horizon_weeks,
+        )
+
+        return [
+            {
+                "week": i + 1,
+                "prediction_date": r.prediction_date.isoformat(),
+                "predicted_count": r.predicted_count,
+                "confidence_lower": r.confidence_lower,
+                "confidence_upper": r.confidence_upper,
+                "risk_level": self._get_risk_level(r.predicted_count),
+            }
+            for i, r in enumerate(results)
         ]
-
-        feature_names = [
-            "crime_count_lag1",
-            "crime_count_lag2",
-            "crime_count_lag3",
-            "crime_count_lag4",
-            "crime_count_rolling_mean_4",
-            "crime_count_rolling_std_4",
-            "crime_count_rolling_mean_8",
-            "crime_trend",
-            "week_sin",
-            "week_cos",
-            "week_sin2",
-            "week_cos2",
-            "month",
-            "is_weekend_ratio",
-        ]
-
-        return np.array(features).reshape(1, -1), feature_names
 
     def _get_risk_level(self, predicted_count: float) -> str:
         """Determine risk level from predicted count."""
@@ -239,93 +541,62 @@ class PredictionService:
         else:
             return "critical"
 
-    def predict(
-        self, lat: float, lon: float, prediction_date: date, horizon_days: int = 7
-    ) -> CrimePrediction:
-        """Make a single prediction."""
-        import pandas as pd
-
-        lat_bin, lon_bin, cell_id = self._location_to_cell(lat, lon)
-        features, feature_names = self._extract_features(lat_bin, lon_bin, prediction_date)
-
-        # Create DataFrame with feature names for sklearn compatibility
-        features_df = pd.DataFrame(features, columns=feature_names)
-
-        # Predict
-        if self.model is None:
-            raise RuntimeError("Model not loaded")
-        predicted_count = float(self.model.predict(features_df)[0])
-
-        # Scale by horizon
-        predicted_count *= horizon_days
-
-        # Confidence intervals (simple approximation for Poisson)
-        std = np.sqrt(predicted_count)
-        ci_lower = max(0, predicted_count - 1.96 * std)
-        ci_upper = predicted_count + 1.96 * std
-
-        return CrimePrediction(
-            latitude=lat,
-            longitude=lon,
-            cell_id=cell_id,
-            prediction_date=prediction_date,
-            predicted_count=round(predicted_count, 2),
-            confidence_lower=round(ci_lower, 2),
-            confidence_upper=round(ci_upper, 2),
-            risk_level=self._get_risk_level(predicted_count),
-        )
-
-    def predict_grid(
-        self, prediction_date: date, horizon_days: int = 7, resolution: int = 10
-    ) -> GridPredictionResponse:
-        """Predict crime counts for entire grid."""
-        import pandas as pd
-
-        grid = np.zeros((resolution, resolution))
-        risk_grid = [["low"] * resolution for _ in range(resolution)]
-
-        if self.model is None:
-            raise RuntimeError("Model not loaded")
-        for lat_bin in range(resolution):
-            for lon_bin in range(resolution):
-                features, feature_names = self._extract_features(
-                    lat_bin, lon_bin, prediction_date
-                )
-                features_df = pd.DataFrame(features, columns=feature_names)
-                predicted = float(self.model.predict(features_df)[0]) * horizon_days
-                grid[lat_bin, lon_bin] = round(predicted, 2)
-                risk_grid[lat_bin][lon_bin] = self._get_risk_level(predicted)
-
-        return GridPredictionResponse(
-            grid=grid.tolist(),
-            risk_grid=risk_grid,
-            prediction_date=prediction_date,
-            horizon_days=horizon_days,
-            grid_resolution=resolution,
-            bounds={
-                "lat_min": self.LAT_MIN,
-                "lat_max": self.LAT_MAX,
-                "lon_min": self.LON_MIN,
-                "lon_max": self.LON_MAX,
-            },
-            model_version=self.model_version,
-            prediction_timestamp=datetime.utcnow(),
-        )
-
     @property
     def is_loaded(self) -> bool:
-        """Check if model is loaded."""
-        return self.model is not None
+        """Check if service is ready."""
+        return self._initialized and self._registry is not None
 
     @property
-    def has_eventflow(self) -> bool:
-        """Check if EventFlow adapters are available."""
-        return EVENTFLOW_AVAILABLE and self.table_adapter is not None
+    def model_version(self) -> str:
+        """Get current model version."""
+        if not self._initialized:
+            return "not_loaded"
+        try:
+            model = self._registry.get()
+            return model.config.version
+        except Exception:
+            return "unknown"
 
     @property
-    def has_downloader(self) -> bool:
-        """Check if chicago_crime_downloader is available."""
-        return DOWNLOADER_AVAILABLE
+    def model_info(self) -> dict[str, Any]:
+        """Get current model information."""
+        if not self._initialized:
+            return {"status": "not_initialized"}
+        try:
+            model = self._registry.get()
+            return model.get_info()
+        except Exception:
+            return {"status": "error"}
+
+    def health_check(self) -> dict[str, Any]:
+        """Check service health.
+
+        Returns:
+            Health status dictionary
+        """
+        self._ensure_initialized()
+
+        health = self._registry.health_check()
+
+        return {
+            "status": "healthy"
+            if all(h.status.value == "healthy" for h in health.values())
+            else "degraded",
+            "models": {
+                model_id: {
+                    "status": h.status.value,
+                    "message": h.message,
+                    "prediction_count": h.prediction_count,
+                    "error_count": h.error_count,
+                }
+                for model_id, h in health.items()
+            },
+            "cache": {
+                "historical_data_entries": len(self._cache._historical_data._cache)
+                if self._cache
+                else 0,
+            },
+        }
 
 
 # Global service instance

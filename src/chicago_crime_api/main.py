@@ -27,9 +27,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     settings = get_settings()
     logger.info(f"Environment: {settings.environment}")
 
-    # Pre-load model
-    service = get_prediction_service()
-    logger.info(f"Model loaded: {service.model_version}")
+    # Initialize and load prediction service
+    try:
+        service = get_prediction_service()
+        service.initialize()  # Explicit initialization
+        logger.info(f"Model loaded: {service.model_version}")
+        logger.info(f"Model info: {service.model_info}")
+    except Exception as e:
+        logger.error(f"Failed to initialize prediction service: {e}")
+        # Continue anyway - service will initialize on first request
 
     yield
 
