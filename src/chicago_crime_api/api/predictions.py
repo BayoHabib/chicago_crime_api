@@ -19,6 +19,16 @@ from chicago_crime_api.services.prediction import PredictionService, get_predict
 router = APIRouter(prefix="/predictions", tags=["predictions"])
 
 
+def require_validated_model(service: PredictionService) -> None:
+    """Prevent inference when no approved model is loaded."""
+    if not service.is_loaded:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "MODEL_NOT_VALIDATED", "message": "Validated model unavailable"},
+        )
+
+
+
 @router.post("/", response_model=PredictionResponse)
 async def predict_crime(
     request: PredictionRequest,
@@ -32,6 +42,7 @@ async def predict_crime(
     - **date**: Target date for prediction
     - **horizon_days**: Number of days to predict (default: 7)
     """
+    require_validated_model(service)
     start_time = time.time()
 
     try:
@@ -64,6 +75,7 @@ async def predict_crime_batch(
 
     Maximum 100 predictions per batch request.
     """
+    require_validated_model(service)
     start_time = time.time()
 
     predictions = []
@@ -102,6 +114,7 @@ async def predict_crime_grid(
 
     Returns a 2D grid of predicted crime counts and risk levels.
     """
+    require_validated_model(service)
     try:
         return service.predict_grid(
             prediction_date=request.prediction_date,

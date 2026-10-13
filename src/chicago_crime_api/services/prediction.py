@@ -1,6 +1,8 @@
 """Crime prediction service using EventFlow adapters and trained models."""
 
 from datetime import date, datetime
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -69,35 +71,49 @@ class PredictionService:
             print(f"Warning: Failed to initialize EventFlow adapters: {e}")
 
     def _load_model(self) -> None:
-        """Load the trained model from disk."""
+        """Fail closed unless a locally approved and integrity-checked model exists.
+
+        A valid training/validation pipeline must create the metadata manifest.
+        Joblib/pickle can execute code when loaded: never point this service at
+        untrusted model artifacts, even when a checksum is present.
+        """
         model_path = Path(self.settings.model_path)
+        artifact = model_path / "crime_model.joblib"
+        manifest_path = model_path / "model_metadata.json"
+        self.model = None
+        self.model_version = "not_loaded"
+        self.model_info = {}
 
-        # Try to load the latest model
-        model_file = model_path / "crime_model.joblib"
-        if model_file.exists():
-            self.model = joblib.load(model_file)
-            self.model_version = self._get_model_version(model_path)
-            self.model_info = self._load_model_info(model_path)
-        else:
-            # Use baseline model if no trained model exists
-            self._create_baseline_model()
+        if not artifact.is_file() or not manifest_path.is_file():
+            return
 
-    def _create_baseline_model(self) -> None:
-        """Create a simple baseline model for initial deployment."""
-        from sklearn.linear_model import PoissonRegressor
-
-        # Simple Poisson baseline
-        self.model = PoissonRegressor(alpha=1.0)
-        # Fit on dummy data (will be replaced by real training)
-        x_dummy = np.random.rand(100, 5)
-        y_dummy = np.random.poisson(5, 100)
-        self.model.fit(x_dummy, y_dummy)
-        self.model_version = "baseline_v1"
-        self.model_info = {
-            "name": "PoissonRegressor",
-            "type": "baseline",
-            "features": ["lat_bin", "lon_bin", "day_of_week", "month", "hour"],
-        }
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                return
+            if manifest.get("validation_status") != "validated":
+                return
+            if not manifest.get("validation_run_id") or not manifest.get("version"):
+                return
+            expected_sha = manifest.get("artifact_sha256")
+            if not isinstance(expected_sha, str) or len(expected_sha) != 64:
+                return
+            with artifact.open("rb") as model_file:
+                hasher = hashlib.sha256()
+                for chunk in iter(lambda: model_file.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+                digest = hasher.hexdigest()
+            if digest != expected_sha.lower():
+                return
+            # Artifact provenance and approval must be guaranteed by the deployment
+            # pipeline; a checksum supplied alongside an untrusted pickle is insufficient.
+            self.model = joblib.load(artifact)
+            self.model_version = str(manifest["version"])
+            self.model_info = manifest
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            self.model = None
+            self.model_version = "not_loaded"
+            self.model_info = {}
 
     def _get_model_version(self, model_path: Path) -> str:
         """Get model version from metadata file."""

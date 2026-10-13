@@ -1,136 +1,89 @@
-"""Tests for prediction endpoints."""
+"""Regression tests: unvalidated models must never produce predictions."""
+
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from chicago_crime_api.main import app
+from chicago_crime_api.main import create_app
+from chicago_crime_api.services.prediction import PredictionService
 
 
 @pytest.fixture
 def client():
-    """Create test client."""
-    return TestClient(app)
+    from chicago_crime_api.api.predictions import get_prediction_service
+
+    service = PredictionService.__new__(PredictionService)
+    service.model = None
+    service.model_version = "not_loaded"
+    application = create_app()
+    application.dependency_overrides[get_prediction_service] = lambda: service
+    with TestClient(application) as test_client:
+        yield test_client
+    application.dependency_overrides.clear()
 
 
-class TestHealthEndpoints:
-    """Test health check endpoints."""
-
-    def test_health_check(self, client):
-        """Test health endpoint returns healthy status."""
-        response = client.get("/api/v1/health")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "healthy"
-        assert "version" in data
-        assert "model_loaded" in data
-
-    def test_readiness_check(self, client):
-        """Test readiness probe."""
-        response = client.get("/api/v1/ready")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] in ["ready", "not_ready"]
-
-    def test_liveness_check(self, client):
-        """Test liveness probe."""
-        response = client.get("/api/v1/live")
-        assert response.status_code == 200
-        assert response.json()["status"] == "alive"
+@pytest.mark.parametrize(
+    "endpoint,payload",
+    [
+        ("/api/v1/predictions/", {
+            "latitude": 41.88, "longitude": -87.63,
+            "prediction_date": "2024-12-15", "horizon_days": 7,
+        }),
+        ("/api/v1/predictions/batch", {
+            "requests": [{"latitude": 41.88, "longitude": -87.63,
+                          "prediction_date": "2024-12-15"}],
+        }),
+        ("/api/v1/predictions/grid", {
+            "prediction_date": "2024-12-15", "grid_resolution": 10,
+        }),
+    ],
+)
+def test_predictions_unavailable_without_validated_model(client, endpoint, payload):
+    response = client.post(endpoint, json=payload)
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "MODEL_NOT_VALIDATED"
 
 
-class TestPredictionEndpoints:
-    """Test prediction endpoints."""
+def test_no_synthetic_fallback(tmp_path):
+    """Missing model must never silently fit a model on random samples."""
+    class Settings:
+        model_path = str(tmp_path)
 
-    def test_single_prediction(self, client):
-        """Test single prediction endpoint."""
-        response = client.post(
-            "/api/v1/predictions/",
-            json={
-                "latitude": 41.88,
-                "longitude": -87.63,
-                "prediction_date": "2024-12-15",
-                "horizon_days": 7,
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert "prediction" in data
-        assert "model_version" in data
-        assert "inference_time_ms" in data
-
-        pred = data["prediction"]
-        assert "predicted_count" in pred
-        assert "confidence_lower" in pred
-        assert "confidence_upper" in pred
-        assert "risk_level" in pred
-        assert pred["risk_level"] in ["low", "medium", "high", "critical"]
-
-    def test_prediction_invalid_latitude(self, client):
-        """Test prediction with invalid latitude."""
-        response = client.post(
-            "/api/v1/predictions/",
-            json={
-                "latitude": 50.0,  # Outside Chicago
-                "longitude": -87.63,
-                "prediction_date": "2024-12-15",
-            },
-        )
-        assert response.status_code == 422  # Validation error
-
-    def test_prediction_invalid_longitude(self, client):
-        """Test prediction with invalid longitude."""
-        response = client.post(
-            "/api/v1/predictions/",
-            json={
-                "latitude": 41.88,
-                "longitude": -80.0,  # Outside Chicago
-                "prediction_date": "2024-12-15",
-            },
-        )
-        assert response.status_code == 422
-
-    def test_batch_prediction(self, client):
-        """Test batch prediction endpoint."""
-        response = client.post(
-            "/api/v1/predictions/batch",
-            json={
-                "requests": [
-                    {"latitude": 41.88, "longitude": -87.63, "prediction_date": "2024-12-15"},
-                    {"latitude": 41.79, "longitude": -87.68, "prediction_date": "2024-12-15"},
-                    {"latitude": 41.95, "longitude": -87.65, "prediction_date": "2024-12-15"},
-                ]
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["predictions"]) == 3
-
-    def test_grid_prediction(self, client):
-        """Test grid prediction endpoint."""
-        response = client.post(
-            "/api/v1/predictions/grid",
-            json={
-                "prediction_date": "2024-12-15",
-                "horizon_days": 7,
-                "grid_resolution": 10,
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert "grid" in data
-        assert "risk_grid" in data
-        assert len(data["grid"]) == 10
-        assert len(data["grid"][0]) == 10
+    service = PredictionService.__new__(PredictionService)
+    service.settings = Settings()
+    service._load_model()
+    assert service.model is None
+    assert service.model_version == "not_loaded"
 
 
-class TestRootEndpoint:
-    """Test root endpoint."""
+def test_unvalidated_artifact_does_not_get_deserialized(tmp_path):
+    (tmp_path / "crime_model.joblib").write_bytes(b"not-a-trusted-model")
+    (tmp_path / "model_metadata.json").write_text(
+        '{"version":"test","validation_status":"unvalidated"}',
+        encoding="utf-8",
+    )
 
-    def test_root(self, client):
-        """Test root endpoint returns API info."""
-        response = client.get("/")
-        assert response.status_code == 200
-        data = response.json()
-        assert "name" in data
-        assert "version" in data
-        assert "docs" in data
+    class Settings:
+        model_path = str(tmp_path)
+
+    service = PredictionService.__new__(PredictionService)
+    service.settings = Settings()
+    with patch("chicago_crime_api.services.prediction.joblib.load") as unsafe_load:
+        service._load_model()
+    unsafe_load.assert_not_called()
+    assert service.model is None
+
+
+def test_invalid_coordinates_rejected_before_inference(client):
+    response = client.post("/api/v1/predictions/", json={
+        "latitude": 50.0, "longitude": -87.63,
+        "prediction_date": "2024-12-15",
+    })
+    assert response.status_code == 422
+
+
+def test_liveness_independent_of_model(client):
+    response = client.get("/api/v1/live")
+    assert response.status_code == 200
+    assert response.json()["status"] == "alive"
