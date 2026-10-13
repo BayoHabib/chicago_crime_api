@@ -99,7 +99,10 @@ class PredictionService:
             if not isinstance(expected_sha, str) or len(expected_sha) != 64:
                 return
             with artifact.open("rb") as model_file:
-                digest = hashlib.file_digest(model_file, "sha256").hexdigest()
+                hasher = hashlib.sha256()
+                for chunk in iter(lambda: model_file.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+                digest = hasher.hexdigest()
             if digest != expected_sha.lower():
                 return
             # Artifact provenance and approval must be guaranteed by the deployment
